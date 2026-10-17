@@ -66,7 +66,7 @@ genetics never sees a guessed link:
 | `fosteredIn`, with `socialMotherId` / `socialFatherId` | `KIN:021` isFosterParentOf; noted in the narrative |
 | social parents of a child who was not fostered in | `KIN:020` isParentFigureOf; noted in the narrative |
 | a union without children together | `KIN:026` isPartnerOf |
-| a union of two people with an ancestor in common | `KIN:030` isConsanguineousPartnerOf |
+| a couple related as second cousins or closer, with or without a union recorded | `KIN:030` isConsanguineousPartnerOf |
 | `proband` | `indexPatients`, and the Family's proband |
 | `deceased` | vital status `DECEASED` (otherwise `ALIVE`) |
 | `condition` | a disease or phenotypic feature, once it is matched to an ontology term |
@@ -76,9 +76,21 @@ genetics never sees a guessed link:
 In the Family's PED-style pedigree, a father is given only when he is the
 biological father, confirmed or reported; otherwise the father is `0`, as in a
 PED file. A union whose couple have children together needs no relationship of
-its own: the children imply it. `--no-social-edges` leaves out the social and
-foster parents for a strictly genetic pedigree, though the narrative still
+its own: the children imply it. Two people with a child together are a couple
+whether or not the session records a union, as Abusua treats them; if they are
+second cousins or closer, which is how KIN defines consanguinity, they are
+written as consanguineous partners. `--no-social-edges` leaves out the social
+and foster parents for a strictly genetic pedigree, though the narrative still
 mentions them.
+
+The narrative starts with any text given with `--narrative`. Then comes its
+own part, which starts "Pedigree from Abusua Pedigree Studio:" and says what
+the structure cannot, one fixed sentence at a time: who is a carrier, who has
+a condition without an ontology term (quoted as the session has it), who is
+affected with nothing recorded or unaffected, a father whose paternity is
+reported or unknown, a social father, a social mother or father, and who was
+fostered in. ga4gh2abusua reads only that part, so nothing you write yourself
+is taken for one of those facts.
 
 **Names are never written.** Phenopackets have no field for a name and are
 meant to be shareable without one. The files use the session's own ids (`i1`,
@@ -106,13 +118,17 @@ matched to one. A condition is matched by the first of these that applies:
    files, can be used as they are;
 2. an **ontology id in brackets** after the condition in the session, such as
    `Sickle cell anaemia [MONDO:0011382]` (ga4gh2abusua writes conditions back
-   this way, so a round trip keeps the terms);
+   this way, so a round trip keeps the terms). Only an id from an ontology
+   pedigree-ga4gh can declare in `metaData` counts (the HPO, Mondo, OMIM,
+   Orphanet, the Disease Ontology, SNOMED CT, ICD-10-CM and the like), so
+   free text such as "Hypertension (BP:160/95)" is not taken for one;
 3. the terms file again, for the name without a final qualifier in brackets
    ("Sickle cell anaemia" for "Sickle cell anaemia (HbSS)");
 4. a short **built-in list** of the conditions in the Abusua examples (sickle
    cell disease, Huntington disease, Duchenne muscular dystrophy,
    oculocutaneous albinism, breast cancer and hereditary breast ovarian cancer
-   syndrome), by their exact Mondo names and synonyms.
+   syndrome), by their exact Mondo names and synonyms, and the British
+   spelling "anaemia".
 
 Each term records the release of its ontology in the files' `metaData` when
 it is known: from the terms file, if an entry gives a `version`, or, when every
@@ -124,12 +140,13 @@ A matched term goes where its ontology says: an HPO term among the phenotypic
 features, a Mondo or OMIM term among the diseases. Nothing is guessed. **A
 condition that is not matched is left out of the files**, because a
 Phenopacket cannot hold a term without an id, and the narrative says who has
-it ("i5 has Night blindness, which has no ontology term yet"). The command
+it (`i5 has "Night blindness", which has no ontology term yet.`). The command
 lists any such conditions when it finishes; add them to the terms file and run
 it again.
 
 A condition recorded for someone marked unaffected is written as excluded (looked
-for and found to be absent).
+for and found to be absent). A condition recorded for someone whose affected
+status was left unknown means they have it, so they are affected.
 
 **Carriers** are not coded. Being a carrier is not a phenotype, so no ontology
 has a phenotype term for it, and Phenopackets have no field for carrier status:

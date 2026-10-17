@@ -24,6 +24,18 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 import json
 import pathlib
+import re
+
+
+# How a session says someone is a carrier: Abusua's own token, and "Heterozygous carrier", the label
+# abusua2ga4gh 0.2 gave its mistaken carrier term (HP:0032500, which is "Exacerbated by tobacco use"), as
+# ga4gh2abusua 0.3 wrote it back from such a file.
+_CARRIER_TOKENS = {"carrier", "carriers", "heterozygous carrier"}
+_CARRIER_ID = re.compile(r"\s*\[\s*HP:0032500\s*\]\s*$", re.I)
+
+
+def _is_carrier_token(text: str) -> bool:
+    return _CARRIER_ID.sub("", text or "").strip().lower() in _CARRIER_TOKENS
 
 
 # Recognised values, kept permissive: unknown / novel values pass through with a warning
@@ -84,20 +96,15 @@ class Person:
     def conditions(self) -> List[str]:
         """The condition field split into individual phenotype labels.
 
-        The literal token 'carrier' is a state, not a disease, and is reported
+        The token 'carrier' is a state, not a disease, and is reported
         separately via :pyattr:`is_carrier`; it is excluded here.
         """
-        out = []
-        for part in self.condition.split(";"):
-            label = part.strip()
-            if label and label.lower() not in ("carrier", "carriers"):
-                out.append(label)
-        return out
+        return [part.strip() for part in self.condition.split(";")
+                if part.strip() and not _is_carrier_token(part)]
 
     @property
     def is_carrier(self) -> bool:
-        return any(p.strip().lower() in ("carrier", "carriers")
-                   for p in self.condition.split(";"))
+        return any(_is_carrier_token(p) for p in self.condition.split(";"))
 
     @property
     def display(self) -> str:

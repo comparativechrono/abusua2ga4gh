@@ -19,6 +19,8 @@ import pathlib
 import sys
 from typing import List
 
+from pedigree_ga4gh.phenopackets import is_partial_date
+
 from . import __version__
 from .convert import to_kindred, unmatched
 from .family import to_family
@@ -101,21 +103,17 @@ def main(argv=None) -> int:
 
     _emit("session", ped.validate())
 
+    if args.date and not is_partial_date(args.date):
+        print("abusua2ga4gh: --date {!r} must be YYYY, YYYY-MM or YYYY-MM-DD".format(args.date), file=sys.stderr)
+        return 1
+
     out_dir = pathlib.Path(args.out_dir)
     stem = pathlib.Path(args.input).stem
     want_family = args.format in ("default", "family", "all")
     want_pedigree = args.format in ("default", "pedigree", "all")
     want_packets = args.format in ("phenopackets", "all")
     results = {}
-    written: List[pathlib.Path] = []
-
-    def write(name: str, doc) -> None:
-        if args.stdout:
-            return
-        out_dir.mkdir(parents=True, exist_ok=True)
-        path = out_dir / name
-        path.write_text(json.dumps(doc, indent=args.indent, ensure_ascii=False) + "\n", encoding="utf-8")
-        written.append(path)
+    files: List = []                     # (name, document): everything is made before anything is written
 
     try:
         if want_family:
@@ -125,7 +123,7 @@ def main(argv=None) -> int:
             _emit("family", notes)
             if family:
                 results["family"] = family
-                write("{}.family.json".format(stem), family)
+                files.append(("{}.family.json".format(stem), family))
             elif args.format == "family":
                 return 1
         if want_pedigree:
@@ -135,18 +133,29 @@ def main(argv=None) -> int:
                                                 condition_kind=args.conditions_as, created_by=args.created_by)
             _emit("ga4gh-pedigree", notes)
             results["ga4gh_pedigree"] = pedigree
-            write("{}.ga4gh-pedigree.json".format(stem), pedigree)
+            files.append(("{}.ga4gh-pedigree.json".format(stem), pedigree))
         if want_packets:
             packets, notes = to_phenopackets(ped, affected_only=not args.all_individuals,
                                              created_by=args.created_by, condition_kind=args.conditions_as,
                                              terms=terms)
             _emit("phenopackets", notes)
             results["phenopackets"] = packets
-            for packet in packets:
-                write("{}.{}.phenopacket.json".format(stem, packet["id"]), packet)
+            files.extend(("{}.{}.phenopacket.json".format(stem, packet["id"]), packet) for packet in packets)
     except ValueError as exc:
         print("abusua2ga4gh: {}".format(exc), file=sys.stderr)
         return 1
+
+    written: List[pathlib.Path] = []
+    if not args.stdout:
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for name, doc in files:
+                path = out_dir / name
+                path.write_text(json.dumps(doc, indent=args.indent, ensure_ascii=False) + "\n", encoding="utf-8")
+                written.append(path)
+        except OSError as exc:
+            print("abusua2ga4gh: could not write the files: {}".format(exc), file=sys.stderr)
+            return 1
 
     if args.stdout:
         doc = next(iter(results.values())) if len(results) == 1 else results

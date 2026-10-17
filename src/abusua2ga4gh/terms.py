@@ -11,7 +11,10 @@ A condition is matched by the first of these that applies:
 1. a terms file (``--terms``), mapping condition names to ontology terms,
    matched without regard to case;
 2. an ontology id written after the condition in square or round brackets,
-   as ga4gh2abusua writes conditions back: ``Sickle cell anaemia [MONDO:0011382]``;
+   as ga4gh2abusua writes conditions back: ``Sickle cell anaemia [MONDO:0011382]``.
+   Only an id from an ontology pedigree-ga4gh can declare counts (the HPO,
+   Mondo, OMIM, Orphanet, the Disease Ontology, SNOMED CT, ICD-10-CM and the
+   like), so free text such as "(BP:160/95)" is not taken for one;
 3. the terms file again, for the name without a final qualifier in brackets
    ("Sickle cell anaemia" for "Sickle cell anaemia (HbSS)");
 4. a short built-in list of exact names, for conditions in the Abusua examples.
@@ -26,7 +29,8 @@ from typing import Dict, Optional, Tuple
 from pedigree_ga4gh import DISEASE, PHENOTYPE, ontology
 
 # Names (lower case) and the Mondo terms they are, checked against Mondo
-# release 2026-10-06: each name is the term's label or one of its exact synonyms.
+# release 2026-10-06: each name is the term's label or one of its exact
+# synonyms, or the British spelling of one ("sickle cell anaemia").
 BUILT_IN_RELEASE = "2026-10-06"
 BUILT_IN: Dict[str, Tuple[str, str]] = {
     "sickle cell anaemia": ("MONDO:0011382", "sickle cell disease"),
@@ -75,11 +79,14 @@ def split_label(text: str) -> Tuple[str, Optional[str]]:
     """``"Breast cancer [MONDO:0007254]"`` -> ``("Breast cancer", "MONDO:0007254")``.
 
     Without an ontology id in brackets at the end, the id is ``None``; a
-    qualifier such as "(HbSS)" is not an id and is left in the name.
+    qualifier such as "(HbSS)" or "(BP:160/95)" is not an id and is left in
+    the name.
     """
     m = _ID_IN_BRACKETS.match(text or "")
-    if m and ontology.is_curie(ontology.tidy_curie(m.group(2))):
-        return (m.group(1).strip() or m.group(2)), ontology.tidy_curie(m.group(2))
+    if m:
+        curie = ontology.tidy_curie(m.group(2))
+        if ontology.is_curie(curie) and ontology.prefix_of(curie) in ontology.RESOURCES:
+            return (m.group(1).strip() or m.group(2)), curie
     return (text or "").strip(), None
 
 

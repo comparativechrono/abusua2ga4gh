@@ -18,7 +18,8 @@ In the Abusua session                                  In the GA4GH files
 ``fosteredIn``, ``socialMotherId``/``socialFatherId``  isFosterParentOf (KIN:021); noted in the narrative
 social parents of a child not fostered in              isParentFigureOf (KIN:020); noted in the narrative
 a union without children together                      isPartnerOf (KIN:026)
-a union of two people with an ancestor in common       isConsanguineousPartnerOf (KIN:030)
+a couple related as second cousins or closer           isConsanguineousPartnerOf (KIN:030), with or
+                                                       without a union recorded
 ``proband``                                            indexPatients; the Family's proband
 ``deceased``                                           vitalStatus DECEASED (otherwise ALIVE)
 ``condition``                                          a disease or phenotype, once matched to an ontology
@@ -35,8 +36,9 @@ and the manually set abusua and ntoro are not written either; neither standard
 has a place for them.
 
 The narrative's notes are written in fixed sentences (the ``NOTE_*`` patterns
-below), so that ga4gh2abusua can read them back and a session survives the
-round trip.
+below), after the sentence that opens the narrative's own part (``BLOCK``), so
+that ga4gh2abusua can read them back without mistaking text given with
+``--narrative``, which comes before it, for one of them.
 """
 from __future__ import annotations
 
@@ -49,19 +51,28 @@ from .terms import BUILT_IN_RELEASE, load_terms, match
 
 SOURCE = "Abusua Pedigree Studio"
 
-# The sentences the narrative's notes are written in.
+# The narrative's own part starts with this sentence; ga4gh2abusua reads only what follows it, so that text
+# given with --narrative (which comes before it) is never taken for one of the notes below.
+BLOCK = "Pedigree from {source}: {count}{proband}."
+
+# The sentences the notes are written in, each starting a sentence. A condition's own text is quoted, with
+# any backslash or double quote in it escaped by a backslash.
 NOTE_REPORTED = "{child}'s biological father, {father}, is reported, not confirmed."
 NOTE_SOCIAL_FATHER = "{father} is the social father of {child}, not the biological father."
 NOTE_UNKNOWN_FATHER = ("{child}'s father is recorded as {father}, but it is not known whether he is the "
                        "biological father.")
 NOTE_FOSTERED = "{child} was fostered in."
-NOTE_FOSTERED_BY = "{child} was fostered in by {parents}."
 NOTE_SOCIAL_PARENT = "{parent} is the social {role} of {child}."
 NOTE_CARRIER = "{person} is a carrier."
-NOTE_UNMATCHED = "{person} has {condition}, which has no ontology term yet."
-NOTE_UNMATCHED_EXCLUDED = "{person} is unaffected by {condition}, which has no ontology term yet."
+NOTE_UNMATCHED = '{person} has "{condition}", which has no ontology term yet.'
+NOTE_UNMATCHED_EXCLUDED = '{person} is unaffected by "{condition}", which has no ontology term yet.'
 NOTE_AFFECTED = "{person} is affected, but no condition is recorded."
 NOTE_UNAFFECTED = "Recorded as unaffected: {people}."
+
+
+def quote(text: str) -> str:
+    """A condition's text as the notes write it between double quotes."""
+    return (text or "").replace("\\", "\\\\").replace('"', '\\"')
 
 _SEX = {"M": "MALE", "F": "FEMALE"}
 
@@ -111,9 +122,11 @@ def to_kindred(ped: Pedigree, *, terms=None, condition_kind: str = DISEASE, incl
     listed_only: Dict[str, bool] = {}
 
     for p in ped.list():
+        affected = {"affected": True, "unaffected": False}.get(p.affected)
+        if affected is None and p.conditions and include_clinical:
+            affected = True                 # a condition recorded for someone means they have it
         m = Member(id=p.id, sex=_SEX.get(p.sex, "UNKNOWN_SEX"), index=p.proband,
-                   vital_status="DECEASED" if p.deceased else "ALIVE",
-                   affected={"affected": True, "unaffected": False}.get(p.affected))
+                   vital_status="DECEASED" if p.deceased else "ALIVE", affected=affected)
         if p.sex not in ("M", "F"):
             warnings.append("{}: sex unknown (written as UNKNOWN_SEX)".format(p.id))
         if include_clinical:
@@ -123,7 +136,7 @@ def to_kindred(ped: Pedigree, *, terms=None, condition_kind: str = DISEASE, incl
                 if hit is None:
                     m.terms.append(Term(label=condition, kind=kind, excluded=excluded))
                     clinical.append((NOTE_UNMATCHED_EXCLUDED if excluded else NOTE_UNMATCHED).format(
-                        person=p.id, condition=condition))
+                        person=p.id, condition=quote(condition)))
                     continue
                 m.terms.append(Term(label=hit["label"], id=hit["id"], kind=hit["kind"], excluded=excluded))
                 prefix = ontology.prefix_of(hit["id"])
@@ -175,43 +188,45 @@ def to_kindred(ped: Pedigree, *, terms=None, condition_kind: str = DISEASE, incl
             if sp is not None and sp.id not in (p.bio_mother_id, p.bio_father_id) and sp.id != p.id:
                 social.append((sp.id, role))
         if p.fostered_in:
-            if social:
-                notes.append(NOTE_FOSTERED_BY.format(child=p.id, parents=_and([s for s, _ in social])))
-            else:
-                notes.append(NOTE_FOSTERED.format(child=p.id))
+            notes.append(NOTE_FOSTERED.format(child=p.id))
+        for sid, role in social:
+            # the role is said in so many words, since a social parent's sex may not be recorded
+            notes.append(NOTE_SOCIAL_PARENT.format(parent=sid, role=role, child=p.id))
             if include_social_edges:
-                for sid, _ in social:
-                    k.relations.append(Relation(sid, kin.FOSTER_PARENT, p.id))
-        else:
-            for sid, role in social:
-                notes.append(NOTE_SOCIAL_PARENT.format(parent=sid, role=role, child=p.id))
-                if include_social_edges:
-                    k.relations.append(Relation(sid, kin.PARENT_FIGURE, p.id))
+                k.relations.append(Relation(sid, kin.FOSTER_PARENT if p.fostered_in else kin.PARENT_FIGURE, p.id))
 
-    # unions: a couple's shared children imply that they are partners; others are written out
+    # couples: the unions, and every two people with a child together (Abusua treats those as partners
+    # whether or not a union is recorded). Shared children imply a partnership, so only a union without
+    # them is written out (isPartnerOf); a couple related as second cousins or closer is written as
+    # consanguineous (isConsanguineousPartnerOf), as KIN defines it.
     parents_of = _biological_children(k.relations)
+    couples: List[Tuple[str, str, bool]] = []
     seen = set()
     for u in ped.unions:
         a, b = ped.get(u.a), ped.get(u.b)
         if a is None or b is None or a.id == b.id or frozenset((a.id, b.id)) in seen:
             continue
         seen.add(frozenset((a.id, b.id)))
-        related = bool(k.ancestors(a.id) & k.ancestors(b.id)) or a.id in k.ancestors(b.id) \
-            or b.id in k.ancestors(a.id)
-        shared = any({a.id, b.id} <= ps for ps in parents_of.values())
-        if related:
-            k.relations.append(Relation(a.id, kin.CONSANGUINEOUS_PARTNER, b.id))
-        elif not shared:
-            k.relations.append(Relation(a.id, kin.PARTNER, b.id))
+        couples.append((a.id, b.id, True))
+    for child in k.members:
+        ps = sorted(parents_of.get(child.id, ()), key=lambda x: [m.id for m in k.members].index(x))
+        if len(ps) == 2 and frozenset(ps) not in seen:
+            seen.add(frozenset(ps))
+            couples.append((ps[0], ps[1], False))
+    for a, b, union in couples:
+        if k.consanguineous(a, b):
+            k.relations.append(Relation(a, kin.CONSANGUINEOUS_PARTNER, b))
+        elif union and not any({a, b} <= ps for ps in parents_of.values()):
+            k.relations.append(Relation(a, kin.PARTNER, b))
 
     index = [m.id for m in k.members if m.index]
     parts = []
     if narrative and narrative.strip():
         text = narrative.strip()
         parts.append(text if text.endswith((".", "!", "?")) else text + ".")
-    parts.append("Pedigree from {}: {} {}{}.".format(
-        SOURCE, len(k.members), "person" if len(k.members) == 1 else "people",
-        "; proband {}".format(_and(index)) if index else ""))
+    parts.append(BLOCK.format(source=SOURCE, count="{} {}".format(
+        len(k.members), "person" if len(k.members) == 1 else "people"),
+        proband="; proband {}".format(_and(index)) if index else ""))
     conditions = sorted({t.label for m in k.members for t in m.terms}, key=str.lower)
     if conditions:
         parts.append("Conditions: {}.".format(", ".join(conditions)))

@@ -21,7 +21,10 @@ standard. In 0.2:
 In 0.3 every person is a Phenopacket v2 with its own `metaData`, and
 relationships are `{individualId, relation, relativeId}`. Anything that 0.2
 put in a relationship's description, such as reported paternity, is now said
-in the narrative, in fixed sentences that ga4gh2abusua reads back.
+in the narrative, in fixed sentences that ga4gh2abusua reads back. They
+follow the narrative's own opening sentence ("Pedigree from Abusua Pedigree
+Studio: ..."), after any text given with `--narrative`, and quote a condition's
+own text, so that neither can be misread.
 
 **Social and foster parents** have their own KIN terms. 0.2 wrote both as
 `KIN:022` *isAdoptiveParentOf*, although neither is an adoption:
@@ -43,7 +46,11 @@ a note, instead of being written with an empty `id`, which the Phenopacket
 schema does not allow. The narrative says who has each one. `--terms FILE` is
 new: it matches conditions to ontology terms, without regard to case. So is
 an ontology id in brackets after the condition (`Sickle cell anaemia
-[MONDO:0011382]`), which is how ga4gh2abusua 0.4 writes conditions back.
+[MONDO:0011382]`), which is how ga4gh2abusua 0.4 writes conditions back; only
+ids from ontologies that can be declared in `metaData` count, so free text
+such as "(BP:160/95)" is not taken for one. A condition recorded for someone
+whose affected status is unknown makes them affected, as a matched one
+always did.
 
 **The built-in list of conditions** had two wrong ids, which are corrected:
 
@@ -62,8 +69,9 @@ checked against (2026-10-06) is recorded in `metaData`.
 **Other changes**
 
 - Unions are written: `KIN:026` *isPartnerOf* for a couple without children
-  together, and `KIN:030` *isConsanguineousPartnerOf* for a couple with an
-  ancestor in common.
+  together, and `KIN:030` *isConsanguineousPartnerOf* for a couple related
+  as second cousins or closer, as KIN defines it, whether or not a union is
+  recorded.
 - A father of unknown paternity is still not given as the biological father,
   but the narrative now says who is recorded as the father.
 - The narrative also says who is marked affected with no condition
@@ -79,7 +87,11 @@ checked against (2026-10-06) is recorded in `metaData`.
   *isPolyzygoticMultipleBirthSiblingOf*, as KIN labels it (0.2 had
   *isDizygoticMultipleBirthSiblingOf*). Neither was used in a conversion.
 - `--created-by`, `--version` and `python -m abusua2ga4gh` are new, and
-  `--date` is checked (YYYY, YYYY-MM or YYYY-MM-DD).
+  `--date` is checked (YYYY, YYYY-MM or YYYY-MM-DD) before anything is
+  written. All the files are made before any is written, so a mistake never
+  leaves half of them.
+- "Heterozygous carrier", the label 0.2 gave its carrier term, counts as a
+  carrier in a session, as Abusua's own "carrier" does.
 - Python 3.9 or later is needed, as for pedigree-ga4gh.
 - `__version__` now matches the release (0.2.0 reported 0.1.0). There is a
   LICENSE file (the 0.2.0 release said MIT but had none). There are tests, on

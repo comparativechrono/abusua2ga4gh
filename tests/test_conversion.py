@@ -93,7 +93,7 @@ def test_the_dual_layer_becomes_kin_terms():
     narrative = pedigree["narrative"]
     assert "i3's biological father, i1, is reported, not confirmed." in narrative
     assert "i1 is the social father of i5, not the biological father." in narrative
-    assert "i6 was fostered in by i2." in narrative
+    assert "i6 was fostered in. i2 is the social mother of i6." in narrative
     assert any("reported, not confirmed" in w for w in warnings)
 
 
@@ -112,7 +112,7 @@ def test_social_parents_and_a_strictly_biological_pedigree():
     assert ("i9", "KIN:020", "i8") in r and ("i4", "KIN:027", "i8") in r
     bio, _ = to_ga4gh_pedigree(load("asante"), include_social_edges=False)
     assert not [x for x in rels(bio) if x[1] in ("KIN:020", "KIN:021", "KIN:022")]
-    assert "i6 was fostered in by i2." in bio["narrative"]      # the narrative still says so
+    assert "i6 was fostered in. i2 is the social mother of i6." in bio["narrative"]   # still said
 
 
 def test_unions():
@@ -123,6 +123,75 @@ def test_unions():
     assert not [x for x in owusu if x[1] == "KIN:026"]                                     # implied by children
     family, _ = to_family(load("owusu"))
     assert family["consanguinousParents"] is True
+
+
+def test_the_notes_are_a_block_of_their_own():
+    """Text given with --narrative comes first; the notes follow the block's opening sentence, and a
+    condition's own text is quoted, so a full stop or a quotation mark in it does no harm."""
+    ped = Pedigree.from_dict({"fam": "T", "people": {
+        "i1": {"sex": "F", "proband": True, "affected": "affected", "condition": 'Hypertension (dx. 2019); "Odd" one'},
+        "i2": {"sex": "F", "condition": "carrier"}}})
+    pedigree, _ = to_ga4gh_pedigree(ped, narrative="The mother of i1 is a carrier")
+    narrative = pedigree["narrative"]
+    assert narrative.startswith("The mother of i1 is a carrier. Pedigree from Abusua Pedigree Studio: 2 people;")
+    assert 'i1 has "Hypertension (dx. 2019)", which has no ontology term yet.' in narrative
+    assert 'i1 has "\\"Odd\\" one", which has no ontology term yet.' in narrative
+
+
+def test_social_parents_of_unknown_sex_keep_their_role():
+    ped = Pedigree.from_dict({"fam": "T", "people": {
+        "i1": {"sex": "U"}, "i2": {"sex": "U"},
+        "i3": {"sex": "F", "proband": True, "fosteredIn": True, "socialMotherId": "i1", "socialFatherId": "i2"}}})
+    narrative = to_ga4gh_pedigree(ped)[0]["narrative"]
+    assert "i3 was fostered in. i1 is the social mother of i3. i2 is the social father of i3." in narrative
+
+
+def test_a_condition_recorded_for_someone_means_they_have_it():
+    """affected "unknown" with a condition is affected, whether or not the condition has a term yet."""
+    ped = Pedigree.from_dict({"fam": "T", "people": {
+        "i1": {"sex": "F", "proband": True, "condition": "Sickle cell anaemia"},
+        "i2": {"sex": "M", "condition": "Night blindness"}}})
+    persons = {p["individualId"]: p["affectedStatus"] for p in to_family(ped)[0]["pedigree"]["persons"]}
+    assert persons == {"i1": "AFFECTED", "i2": "AFFECTED"}
+
+
+def test_related_couples_are_consanguineous_with_or_without_a_union():
+    """Two people with a child together are a couple to Abusua whether or not a union is recorded; related as
+    second cousins or closer, they are consanguineous partners (KIN:030). Third cousins are not."""
+    data = json.loads((DATA / "owusu.json").read_text(encoding="utf-8"))
+    data["unions"] = [u for u in data["unions"] if {u["a"], u["b"]} != {"i7", "i8"}]
+    assert ("i7", "KIN:030", "i8") in rels(to_ga4gh_pedigree(Pedigree.from_dict(data))[0])
+    people = {"g1": {"sex": "M"}, "g2": {"sex": "F"}}
+    def add(pid, sex, mother=None, father=None):
+        people[pid] = {"sex": sex, "bioMotherId": mother, "bioFatherId": father}
+    add("a", "M", "g2", "g1"); add("b", "F", "g2", "g1")                 # siblings
+    add("a1", "M", None, "a"); add("b1", "F", "b")                         # first cousins
+    add("a2", "M", None, "a1"); add("b2", "F", "b1")                       # second cousins
+    add("a3", "M", None, "a2"); add("b3", "F", "b2")                       # third cousins
+    people["a3"]["proband"] = True
+    ped = Pedigree.from_dict({"fam": "C", "people": people,
+                              "unions": [{"a": "a2", "b": "b2"}, {"a": "a3", "b": "b3"}]})
+    r = rels(to_ga4gh_pedigree(ped)[0])
+    assert ("a2", "KIN:030", "b2") in r
+    assert ("a3", "KIN:026", "b3") in r and ("a3", "KIN:030", "b3") not in r
+
+
+def test_free_text_in_brackets_is_not_an_ontology_id():
+    ped = Pedigree.from_dict({"fam": "T", "people": {
+        "i1": {"sex": "F", "proband": True, "affected": "affected", "condition": "Hypertension (BP:160/95)"}}})
+    pedigree, warnings = to_ga4gh_pedigree(ped)
+    assert errors(validate(pedigree)) == [] and "BP:160/95" not in json.dumps(pedigree["individuals"])
+    assert match("Hypertension (BP:160/95)", {}) is None
+    assert match("Hypertension [HP:0000822]", {})["id"] == "HP:0000822"
+
+
+def test_the_old_carrier_label_is_a_carrier():
+    """ga4gh2abusua 0.3 wrote abusua2ga4gh 0.2's carrier term back as a condition; it is read as a carrier."""
+    ped = Pedigree.from_dict({"fam": "T", "people": {
+        "i1": {"sex": "F", "proband": True, "condition": "Heterozygous carrier [HP:0032500]"}}})
+    assert ped.get("i1").is_carrier and ped.get("i1").conditions == []
+    pedigree, _ = to_ga4gh_pedigree(ped)
+    assert "HP:0032500" not in json.dumps(pedigree) and "i1 is a carrier." in pedigree["narrative"]
 
 
 def test_a_parent_whose_sex_contradicts_the_role():
@@ -173,7 +242,7 @@ def test_unmatched_conditions_are_left_out_and_noted():
     pedigree, warnings = to_ga4gh_pedigree(ped)
     i5 = [p for p in pedigree["individuals"] if p["subject"]["id"] == "i5"][0]
     assert "diseases" not in i5 and "phenotypicFeatures" not in i5
-    assert "i5 has Night blindness, which has no ontology term yet." in pedigree["narrative"]
+    assert 'i5 has "Night blindness", which has no ontology term yet.' in pedigree["narrative"]
     assert any("'Night blindness' was left out" in w for w in warnings)
     assert unmatched(to_kindred(ped)[0]) == ["Night blindness"]
 
@@ -275,6 +344,8 @@ def test_command_line(tmp_path):
     assert code == 0 and json.loads(out)["id"] == "ASANTE" and "--include-names is not needed" in err
     code, out, err = run(DATA / "asante.json", "--format", "pedigree", "--stdout", "--date", "17 October")
     assert code == 1 and "YYYY" in err
+    code, out, err = run(DATA / "asante.json", "--out-dir", tmp_path / "dated", "--date", "17 October")
+    assert code == 1 and not (tmp_path / "dated").exists()      # nothing written, not half the files
     code, out, err = run(tmp_path / "missing.json")
     assert code == 2 and "cannot find" in err
     nobody = tmp_path / "nobody.json"
