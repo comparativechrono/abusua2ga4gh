@@ -1,13 +1,22 @@
-"""
-Kinship Ontology (KIN) term constants used by the GA4GH Pedigree Standard.
+"""The Kinship Ontology (KIN) relations abusua2ga4gh writes, by name.
 
-Source: GA4GH Pedigree Standard documentation and the KIN ontology
-(http://purl.org/ga4gh/kin.owl). Only the terms needed for the Abusua mapping
-are listed; extend as needed.
+Every code and label comes from pedigree-ga4gh's copy of KIN (``pedigree_ga4gh.kin``),
+which holds the whole ontology as published, so they are always written as KIN
+gives them. The names are the ones version 0.2 used, so that code written
+against it still runs; two of 0.2's terms were wrong and are corrected here:
+
+* a sperm donor is ``KIN:004`` *isSpermDonorOf*; 0.2 had ``KIN:039``, which is
+  *hasGestationalCarrier*;
+* ``KIN:011`` is *isPolyzygoticMultipleBirthSiblingOf*; 0.2 labelled it
+  *isDizygoticMultipleBirthSiblingOf*, a label KIN does not have.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+from pedigree_ga4gh import kin as _kin
+
+TERMS = _kin.TERMS
 
 
 @dataclass(frozen=True)
@@ -19,18 +28,30 @@ class KinTerm:
         return {"id": self.id, "label": self.label}
 
 
+def _term(code: str) -> KinTerm:
+    return KinTerm(code, _kin.TERMS[code].label)
+
+
 # Biological parentage
-IS_BIOLOGICAL_MOTHER_OF = KinTerm("KIN:027", "isBiologicalMotherOf")
-IS_BIOLOGICAL_FATHER_OF = KinTerm("KIN:028", "isBiologicalFatherOf")
+IS_BIOLOGICAL_PARENT_OF = _term(_kin.BIOLOGICAL_PARENT)            # KIN:003
+IS_BIOLOGICAL_MOTHER_OF = _term(_kin.BIOLOGICAL_MOTHER)            # KIN:027
+IS_BIOLOGICAL_FATHER_OF = _term(_kin.BIOLOGICAL_FATHER)            # KIN:028
 
-# Social / non-biological parentage
-IS_ADOPTIVE_PARENT_OF = KinTerm("KIN:022", "isAdoptiveParentOf")
+# Social parentage
+IS_PARENT_FIGURE_OF = _term(_kin.PARENT_FIGURE)                    # KIN:020, a social parent
+IS_FOSTER_PARENT_OF = _term(_kin.FOSTER_PARENT)                    # KIN:021
+IS_ADOPTIVE_PARENT_OF = _term(_kin.ADOPTIVE_PARENT)                # KIN:022
 
-# Sibling relationships
-IS_MONOZYGOTIC_SIBLING_OF = KinTerm("KIN:010", "isMonozygoticMultipleBirthSiblingOf")
-IS_DIZYGOTIC_SIBLING_OF = KinTerm("KIN:011", "isDizygoticMultipleBirthSiblingOf")
+# Partners
+IS_PARTNER_OF = _term(_kin.PARTNER)                                # KIN:026
+IS_CONSANGUINEOUS_PARTNER_OF = _term(_kin.CONSANGUINEOUS_PARTNER)  # KIN:030
 
-# Assisted reproduction (available if Abusua later records it)
-IS_GESTATIONAL_CARRIER_OF = KinTerm("KIN:005", "isGestationalCarrierOf")
-IS_OVUM_DONOR_OF = KinTerm("KIN:038", "isOvumDonorOf")
-IS_SPERM_DONOR_OF = KinTerm("KIN:039", "isSpermDonorOf")
+# Siblings (Abusua does not record these yet)
+IS_MONOZYGOTIC_SIBLING_OF = _term(_kin.MONOZYGOTIC_MULTIPLE_BIRTH_SIBLING)   # KIN:010
+IS_POLYZYGOTIC_SIBLING_OF = _term(_kin.POLYZYGOTIC_MULTIPLE_BIRTH_SIBLING)   # KIN:011
+IS_DIZYGOTIC_SIBLING_OF = IS_POLYZYGOTIC_SIBLING_OF                          # 0.2's name for KIN:011
+
+# Assisted reproduction (Abusua does not record these yet)
+IS_GESTATIONAL_CARRIER_OF = _term(_kin.GESTATIONAL_CARRIER)        # KIN:005
+IS_OVUM_DONOR_OF = _term(_kin.OVUM_DONOR)                          # KIN:038
+IS_SPERM_DONOR_OF = _term(_kin.SPERM_DONOR)                        # KIN:004

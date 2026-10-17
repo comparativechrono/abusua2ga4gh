@@ -1,160 +1,189 @@
 # abusua2ga4gh
 
-Convert **Abusua Pedigree Studio** session files (`.json`) into **GA4GH Pedigree Standard** messages and **GA4GH Phenopackets** (schema v2), to make Abusua pedigrees interoperable with the wider genomics ecosystem.
+Convert **Abusua Pedigree Studio** sessions (`.json`) into GA4GH files: a
+**GA4GH Pedigree**, a **Phenopackets v2 Family** and, if you want them,
+standalone **Phenopackets**, so that Abusua pedigrees can be read by other
+genomics software.
 
-Pure Python, no runtime dependencies, Python ≥ 3.8.
+The files are written by [pedigree-ga4gh](https://github.com/comparativechrono/pedigree-ga4gh),
+the one GA4GH implementation that the lab's pedigree tools share, so they are
+in the same standard form as studio2ga4gh's and the phenopacket toolkit's, and
+[ga4gh2abusua](https://github.com/comparativechrono/ga4gh2abusua) turns them back
+into a session.
 
----
-
-## Why these output formats? (the overlap, explained)
-
-The standards are **complementary**, and there are **three valid serialisation forms**. This package can emit all three; by default it produces the two recommended ones.
-
-| Form | What it is | When to use |
-|---|---|---|
-| **Phenopackets `Family`** (single file) | One document holding the **proband** Phenopacket, **relatives** with findings, a **native PED-style pedigree**, and a `consanguinousParents` flag. | The recommended single-file deliverable for family-based genomic diagnostics. **Default.** |
-| **GA4GH Pedigree Standard** | A relationship-centric graph (individuals + KIN-ontology relationships such as `isBiologicalMotherOf`). | Interop with tools built on the GA4GH Pedigree Standard. **Default.** |
-| **Standalone `Phenopacket` per individual** | One file per clinically-relevant person. | When a downstream tool ingests individual phenopackets. **Optional.** |
-
-A `Phenopacket` describes exactly **one** individual; the schema has no "list of phenopackets" container. To put a whole family in **one file**, the standard provides the `Family` message — that is the single-file form, and it embeds the pedigree plus the member phenopackets together.
-
-> **Two different "pedigrees".** The GA4GH **Pedigree Standard** (KIN relationship triples) and the Phenopackets-**native** `Pedigree` (PED-style `Person` rows, used inside `Family`) are different artifacts. This package builds the right one for each output: the KIN graph for the standalone GA4GH Pedigree, and the PED-style rows for `Family.pedigree`.
-
-### Default output
+## Installation
 
 ```bash
-abusua2ga4gh session.json --out-dir out
-```
-
-writes **two files**:
-
-- `session.family.json` — the single-file Phenopackets `Family`
-- `session.ga4gh-pedigree.json` — the GA4GH Pedigree Standard message
-
----
-
-## How the Abusua dual-layer model maps across
-
-Abusua deliberately stores **biological** parentage separately from **social** parentage, with a paternity-certainty flag between them. The converters honour that split — this is the most important behaviour to understand:
-
-- `bioMotherId` → **KIN:027** `isBiologicalMotherOf` (the *mogya* line; always emitted).
-- `bioFatherId` → **KIN:028** `isBiologicalFatherOf`, **but only when `paternity` is `confirmed` or `reported`.** A `social-only` or `unknown` biological father produces **no biological edge** — the genetics must never see a guessed link. `reported` paternity is emitted but flagged in the warnings and annotated on the edge.
-- `fosteredIn` with `socialMotherId` / `socialFatherId` → **KIN:022** `isAdoptiveParentOf` (the closest standard term for a social/foster parent), emitted as a *separate* edge so social and biological structure never get conflated. Use `--no-social-edges` for a strictly genetics-facing graph.
-
-Every suppression or assumption is reported in the conversion warnings, never done silently.
-
----
-
-## Install
-
-```bash
-pip install -e .          # from this directory
-# or, once published:
 pip install abusua2ga4gh
 ```
 
-## Command line
+It needs Python 3.9 or later and installs pedigree-ga4gh with it.
+
+## Usage
 
 ```bash
-# Default: single-file Family + GA4GH Pedigree, into ./out
-abusua2ga4gh session.json --out-dir out
-
-# Just the single-file Phenopackets Family
-abusua2ga4gh session.json --format family
-
-# Standalone per-individual Phenopackets (one file each)
-abusua2ga4gh session.json --format phenopackets
-
-# Every form
-abusua2ga4gh session.json --format all
-
-# GA4GH Pedigree only, biological edges only (strict genetics graph)
-abusua2ga4gh session.json --format pedigree --no-social-edges
-
-# Pick the proband explicitly for the Family
-abusua2ga4gh session.json --format family --proband i6
-
-# Record conditions as phenotypes (HPO-style) instead of diseases
-abusua2ga4gh session.json --conditions-as phenotype
+abusua2ga4gh asante.json --out-dir out
 ```
 
-By default, personal **names are treated as PII and omitted** from output; pass `--include-names` to include them (stored as `alternate_ids`).
+writes two files:
 
-## Python API
+- `out/asante.family.json`, a **Phenopackets Family**: the proband's
+  Phenopacket, Phenopackets for the relatives with findings, and a PED-style
+  pedigree of everyone. This is the single file most clinical tools want.
+- `out/asante.ga4gh-pedigree.json`, a **GA4GH Pedigree**: a Phenopacket for
+  every person and the relationships between them, coded with the Kinship
+  Ontology (KIN). It holds more than the Family can, such as social and foster
+  parents.
+
+Other things you can ask for:
+
+```bash
+abusua2ga4gh asante.json --terms terms.json          # match conditions to ontology terms
+abusua2ga4gh asante.json --format family             # only the Family
+abusua2ga4gh asante.json --format pedigree --no-social-edges   # biological relationships only
+abusua2ga4gh asante.json --format phenopackets       # one Phenopacket per person
+abusua2ga4gh asante.json --format all                # everything
+abusua2ga4gh asante.json --format family --proband i6
+abusua2ga4gh asante.json --format pedigree --stdout --narrative "Seen at the sickle cell clinic" --date 2026-10
+```
+
+Run `abusua2ga4gh --help` for every option. The options of version 0.2 still
+work.
+
+## How the session is written
+
+Abusua keeps biological and social parentage apart, with a flag saying how
+certain the father is. The GA4GH files keep them apart too, so that the
+genetics never sees a guessed link:
+
+| In the Abusua session | In the GA4GH files |
+|---|---|
+| `bioMotherId` | `KIN:027` isBiologicalMotherOf |
+| `bioFatherId`, paternity `confirmed` | `KIN:028` isBiologicalFatherOf |
+| `bioFatherId`, paternity `reported` | `KIN:028` isBiologicalFatherOf, and a note in the narrative |
+| `bioFatherId`, paternity `social-only` | `KIN:020` isParentFigureOf, never a biological relationship; noted in the narrative |
+| `bioFatherId`, paternity `unknown` | no relationship; the narrative says who is recorded as the father |
+| `fosteredIn`, with `socialMotherId` / `socialFatherId` | `KIN:021` isFosterParentOf; noted in the narrative |
+| social parents of a child who was not fostered in | `KIN:020` isParentFigureOf; noted in the narrative |
+| a union without children together | `KIN:026` isPartnerOf |
+| a union of two people with an ancestor in common | `KIN:030` isConsanguineousPartnerOf |
+| `proband` | `indexPatients`, and the Family's proband |
+| `deceased` | vital status `DECEASED` (otherwise `ALIVE`) |
+| `condition` | a disease or phenotypic feature, once it is matched to an ontology term |
+| `carrier` in `condition` | a note in the narrative |
+| `affected` set to `unaffected`, with no condition | a note in the narrative (the Family's PED-style pedigree has it too) |
+
+In the Family's PED-style pedigree, a father is given only when he is the
+biological father, confirmed or reported; otherwise the father is `0`, as in a
+PED file. A union whose couple have children together needs no relationship of
+its own: the children imply it. `--no-social-edges` leaves out the social and
+foster parents for a strictly genetic pedigree, though the narrative still
+mentions them.
+
+**Names are never written.** Phenopackets have no field for a name and are
+meant to be shareable without one. The files use the session's own ids (`i1`,
+`i2` …), which lead back to the session. Notes, layout and the manually set
+abusua and ntoro are not written either, since neither standard has a place
+for them.
+
+## Conditions and ontology terms
+
+Abusua records conditions as free text, such as "Sickle cell anaemia (HbSS)".
+A Phenopacket names every disease and phenotype with an ontology term (Mondo
+or OMIM for diseases, the HPO for phenotypes), so each condition has to be
+matched to one. A condition is matched by the first of these that applies:
+
+1. a **terms file** given with `--terms`, matched without regard to case:
+
+   ```json
+   {
+     "Sickle cell anaemia (HbSS)": "MONDO:0011382",
+     "Night blindness": {"id": "HP:0000662", "label": "Nyctalopia"}
+   }
+   ```
+
+   The `--mapping` files of hponorm and mondonorm, and studio2ga4gh's terms
+   files, can be used as they are;
+2. an **ontology id in brackets** after the condition in the session, such as
+   `Sickle cell anaemia [MONDO:0011382]` (ga4gh2abusua writes conditions back
+   this way, so a round trip keeps the terms);
+3. the terms file again, for the name without a final qualifier in brackets
+   ("Sickle cell anaemia" for "Sickle cell anaemia (HbSS)");
+4. a short **built-in list** of the conditions in the Abusua examples (sickle
+   cell disease, Huntington disease, Duchenne muscular dystrophy,
+   oculocutaneous albinism, breast cancer and hereditary breast ovarian cancer
+   syndrome), by their exact Mondo names and synonyms.
+
+Each term records the release of its ontology in the files' `metaData` when
+it is known: from the terms file, if an entry gives a `version`, or, when every
+Mondo term in the family is one of the built-in list's, the Mondo release the
+list was checked against (2026-10-06). Otherwise the release is recorded as
+unknown.
+
+A matched term goes where its ontology says: an HPO term among the phenotypic
+features, a Mondo or OMIM term among the diseases. Nothing is guessed. **A
+condition that is not matched is left out of the files**, because a
+Phenopacket cannot hold a term without an id, and the narrative says who has
+it ("i5 has Night blindness, which has no ontology term yet"). The command
+lists any such conditions when it finishes; add them to the terms file and run
+it again.
+
+A condition recorded for someone marked unaffected is written as excluded (looked
+for and found to be absent).
+
+**Carriers** are not coded. Being a carrier is not a phenotype, so no ontology
+has a phenotype term for it, and Phenopackets have no field for carrier status:
+the only structured place for it is a genomic interpretation of the variant,
+which needs a person who knows the variant. The GA4GH Pedigree's narrative says
+who is a carrier.
+
+## In Python
 
 ```python
-from abusua2ga4gh import (
-    Pedigree, to_family, to_ga4gh_pedigree, to_phenopackets,
-)
+from abusua2ga4gh import Pedigree, to_family, to_ga4gh_pedigree, to_phenopackets
 
-ped = Pedigree.load("example-sickle-cell.json")
+ped = Pedigree.load("asante.json")
+terms = {"Night blindness": {"id": "HP:0000662", "label": "Nyctalopia"}}
 
-# Recommended: single-file Family (proband + relatives + native pedigree)
-family, warns = to_family(ped, proband_id=None)   # auto-picks the marked proband
-
-# GA4GH Pedigree Standard (KIN-relationship graph)
-pedigree_msg, warns2 = to_ga4gh_pedigree(ped, include_social_edges=True)
-
-# Optional: standalone per-individual Phenopackets
-packets, warns3 = to_phenopackets(ped, affected_only=True)
+family, notes = to_family(ped, terms=terms)           # {} if nobody is the proband or affected
+pedigree, notes = to_ga4gh_pedigree(ped, terms=terms, include_social_edges=True)
+packets, notes = to_phenopackets(ped, terms=terms)
 ```
 
----
+Each function returns the document and a list of notes about the conversion.
+`to_kindred(ped)` gives the family as a `pedigree_ga4gh.Kindred`, for anything
+else pedigree-ga4gh can do with it.
 
-## Conditions: diseases vs phenotypes
+## Checking the files
 
-Abusua records conditions as free text. By default this package records them as **Diseases** (`Disease.term`), which suits diagnosed conditions. If your pedigree instead records **phenotypic abnormalities** (the kind of observations described by HPO), pass `--conditions-as phenotype` (Python: `condition_kind="phenotype"`), and each condition is written as a **PhenotypicFeature** (`PhenotypicFeature.type`) in the Family/Phenopackets output, with the HPO resource declared instead of MONDO.
+`pedigree-ga4gh validate FILE` checks a file against the standard. The tests
+check every file the examples give, and the files have also been checked
+against phenopacket-tools' Phenopackets v2 JSON schemas.
 
-As with disease terms, the converter does **not** guess an ontology id for phenotypes: it puts your free text in the term `label` and leaves the `id` empty for a curator to complete. Carrier status is always recorded as a phenotypic feature (`HP:0032500`) regardless of this setting. The reverse package, `ga4gh2abusua`, reads conditions from both `diseases` and `phenotypicFeatures`, so either choice round-trips back to Abusua identically.
+## Files from version 0.2
 
----
+Version 0.2 did not write the standard's form (see the
+[changelog](CHANGELOG.md)). Its files can be rewritten once with
+`pedigree-ga4gh upgrade FILE -o NEW.json`, which lists every change and what
+still needs a person. If you still have the session, converting it again with
+this version is better: it knows which parents were foster parents and which
+were social fathers, which a 0.2 file only says in a note.
 
-## Important limitation: condition terms
-
-Abusua stores conditions as **free text** (e.g. `"Sickle cell anaemia"`). Phenopackets and the Pedigree disease terms expect **ontology identifiers** (MONDO/OMIM for diseases, HPO for phenotypes).
-
-- A small built-in lookup resolves the conditions used in the bundled examples to MONDO terms.
-- **Any other condition is emitted with its free-text label and an *empty* term `id`, plus a warning.** A curator (or a downstream term-mapping step) must supply the correct ontology id before the output is analysis-grade. **The converter never guesses an ontology id from free text.**
-
-Carrier status is exported as the phenotypic feature `HP:0032500` (Heterozygous carrier); verify this is the intended term for your use.
-
----
-
-## Validating the output
-
-These converters produce JSON that follows the documented structure of each standard, and the test suite checks structural integrity (every relationship resolves, required Phenopacket fields present, correct KIN terms, etc.). For formal schema validation against the official definitions, run the output through:
-
-- the **GA4GH Pedigree validator** / `pedigree-tools` (see the standard's *Tooling* page), and
-- **phenopacket-tools** for Phenopacket v2 validation.
-
-We recommend wiring those into CI once you adopt the package.
-
-## Tests
+## Development
 
 ```bash
-pytest          # 36 tests over the five bundled example sessions
+pip install -e ".[test]"
+pytest
 ```
 
-## Layout
-
-```
-src/abusua2ga4gh/
-  model.py            # load & validate Abusua sessions (typed view, dual-layer fields)
-  kin.py              # Kinship Ontology term constants
-  ga4gh_pedigree.py   # -> GA4GH Pedigree Standard message (KIN relationships)
-  phenopackets.py     # -> standalone Phenopackets v2 (per clinically-relevant individual)
-  family.py           # -> single-file Phenopackets Family (+ native PED-style pedigree)
-  cli.py              # command-line interface
-examples/             # the five disease example sessions
-tests/                # pytest suite
-```
+The tests use fictional families in `tests/data`.
 
 ## References
 
-- GA4GH Pedigree Standard — https://pedigree.readthedocs.io/
-- Kinship Ontology (KIN) — http://purl.org/ga4gh/kin.owl
-- GA4GH Phenopacket Schema v2 — https://phenopacket-schema.readthedocs.io/
+- GA4GH Pedigree Standard: https://pedigree.readthedocs.io/
+- Kinship Ontology (KIN): http://purl.org/ga4gh/kin.owl
+- GA4GH Phenopacket Schema v2: https://phenopacket-schema.readthedocs.io/
 
-## License
+## Licence
 
-MIT.
+MIT

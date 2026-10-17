@@ -1,274 +1,283 @@
-"""
-Tests for abusua2ga4gh: loading, GA4GH Pedigree conversion, and Phenopackets.
+"""Tests for abusua2ga4gh: Abusua sessions written as GA4GH files through pedigree-ga4gh.
 
-Run with:  pytest
+The sessions in tests/data are fictional families written for these tests: Asante (sickle cell disease, with a
+reported father, a social father and a child fostered in), Boateng (Huntington disease, with a father of unknown
+paternity and a childless couple), Owusu (oculocutaneous albinism in a cross-cousin marriage), Mensah (Duchenne
+muscular dystrophy, with a social mother) and Adjei (breast cancer).
 """
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import pathlib
 
 import pytest
+from pedigree_ga4gh import from_document, validate
+from pedigree_ga4gh.validate import errors
 
-from abusua2ga4gh import Pedigree, to_ga4gh_pedigree, to_phenopackets
-from abusua2ga4gh import kin
+from abusua2ga4gh import (Pedigree, kin, to_family, to_ga4gh_pedigree, to_kindred, to_native_pedigree,
+                          to_phenopackets, unmatched)
+from abusua2ga4gh.cli import main
+from abusua2ga4gh.terms import load_terms, match
 
-EXAMPLES = pathlib.Path(__file__).resolve().parents[1] / "examples"
-ALL = sorted(EXAMPLES.glob("example-*.json"))
+DATA = pathlib.Path(__file__).resolve().parent / "data"
+NAMES = ["asante", "boateng", "owusu", "mensah", "adjei"]
+CREATED = "2026-10-17T12:00:00Z"
 
 
 def load(name):
-    return Pedigree.load(EXAMPLES / name)
+    return Pedigree.load(DATA / (name + ".json"))
 
 
-# ---------------------------------------------------------------- loading
-
-def test_examples_present():
-    assert len(ALL) == 5
+def rels(doc):
+    return [(r["individualId"], r["relation"]["id"], r["relativeId"]) for r in doc.get("relationships", [])]
 
 
-@pytest.mark.parametrize("path", ALL, ids=lambda p: p.stem)
-def test_loads_and_validates(path):
-    ped = Pedigree.load(path)
-    assert ped.people
-    # all parent/union references resolve
-    assert ped.validate() == [], f"integrity issues: {ped.validate()}"
+def all_terms(packet):
+    return ([d["term"]["id"] for d in packet.get("diseases", [])]
+            + [f["type"]["id"] for f in packet.get("phenotypicFeatures", [])])
 
 
-def test_dual_layer_fields_preserved():
-    ped = load("example-sickle-cell.json")
-    foster = next(p for p in ped.list() if p.fostered_in)
-    assert foster.bio_mother_id is not None
-    assert foster.bio_father_id is None
-    assert foster.paternity == "unknown"
+# -- the files are valid, and say nothing they should not ----------------------------------------------------
+
+@pytest.mark.parametrize("name", NAMES)
+def test_the_sessions_load(name):
+    ped = load(name)
+    assert ped.people and ped.validate() == []
 
 
-# -------------------------------------------------------- GA4GH Pedigree
-
-@pytest.mark.parametrize("path", ALL, ids=lambda p: p.stem)
-def test_pedigree_structure(path):
-    ped = Pedigree.load(path)
-    msg, warns = to_ga4gh_pedigree(ped)
-    assert msg["id"]
-    assert len(msg["individuals"]) == len(ped.people)
-    # every relationship references real individual ids
-    ids = {p.id for p in ped.list()}
-    for r in msg["relationships"]:
-        assert r["individual_id"] in ids
-        assert r["relative_id"] in ids
-        assert r["relation"]["id"].startswith("KIN:")
+@pytest.mark.parametrize("name", NAMES)
+def test_every_file_is_valid(name):
+    ped = load(name)
+    pedigree, _ = to_ga4gh_pedigree(ped, created=CREATED)
+    family, _ = to_family(ped, created=CREATED)
+    packets, _ = to_phenopackets(ped, created=CREATED)
+    for doc in [pedigree, family] + packets:
+        assert errors(validate(doc)) == [], [f.message for f in errors(validate(doc))]
+    # every person is in the pedigree, and every person is in the Family's PED-style pedigree
+    assert [i["subject"]["id"] for i in pedigree["individuals"]] == list(ped.people)
+    assert [p["individualId"] for p in family["pedigree"]["persons"]] == list(ped.people)
 
 
-def test_pedigree_biological_edges_use_correct_kin_terms():
-    ped = load("example-breast-cancer-brca.json")
-    msg, _ = to_ga4gh_pedigree(ped)
-    mother_edges = [r for r in msg["relationships"]
-                    if r["relation"]["id"] == kin.IS_BIOLOGICAL_MOTHER_OF.id]
-    father_edges = [r for r in msg["relationships"]
-                    if r["relation"]["id"] == kin.IS_BIOLOGICAL_FATHER_OF.id]
-    assert mother_edges and father_edges
-    # label matches the KIN id
-    assert mother_edges[0]["relation"]["label"] == "isBiologicalMotherOf"
-
-
-def test_unknown_paternity_suppresses_biological_father_edge():
-    ped = load("example-sickle-cell.json")
-    msg, warns = to_ga4gh_pedigree(ped)
-    foster = next(p for p in ped.list() if p.fostered_in)
-    # the fostered child (unknown paternity, no bio father) has no father edge
-    father_edges = [r for r in msg["relationships"]
-                    if r["relative_id"] == foster.id
-                    and r["relation"]["id"] == kin.IS_BIOLOGICAL_FATHER_OF.id]
-    assert father_edges == []
-
-
-def test_index_patients_are_probands():
-    ped = load("example-huntington.json")
-    msg, _ = to_ga4gh_pedigree(ped)
-    expected = {p.id for p in ped.probands()}
-    assert set(msg.get("index_patients", [])) == expected
-    assert expected, "example should have a proband"
-
-
-def test_no_social_edges_flag():
-    ped = load("example-sickle-cell.json")
-    with_social, _ = to_ga4gh_pedigree(ped, include_social_edges=True)
-    without_social, _ = to_ga4gh_pedigree(ped, include_social_edges=False)
-    n_adopt_with = sum(1 for r in with_social["relationships"]
-                       if r["relation"]["id"] == kin.IS_ADOPTIVE_PARENT_OF.id)
-    n_adopt_without = sum(1 for r in without_social["relationships"]
-                          if r["relation"]["id"] == kin.IS_ADOPTIVE_PARENT_OF.id)
-    assert n_adopt_without == 0
-    assert n_adopt_without <= n_adopt_with
-
-
-# ------------------------------------------------------------ Phenopackets
-
-@pytest.mark.parametrize("path", ALL, ids=lambda p: p.stem)
-def test_phenopackets_minimal_validity(path):
-    ped = Pedigree.load(path)
-    packets, warns = to_phenopackets(ped)
-    assert packets, "each example has affected individuals"
-    for pp in packets:
-        # required v2 fields
-        assert pp["id"]
-        assert "subject" in pp and pp["subject"]["id"]
-        assert "metaData" in pp
-        assert pp["metaData"]["phenopacketSchemaVersion"] == "2.0"
-        assert "created" in pp["metaData"] and "createdBy" in pp["metaData"]
-
-
-def test_phenopacket_emitted_only_for_relevant_people():
-    ped = load("example-breast-cancer-brca.json")
-    packets, _ = to_phenopackets(ped)
-    ids = {pp["subject"]["id"] for pp in packets}
+@pytest.mark.parametrize("name", NAMES)
+def test_names_are_never_written(name):
+    ped = load(name)
+    text = json.dumps([to_ga4gh_pedigree(ped, include_names=True)[0], to_family(ped, include_names=True)[0],
+                       to_phenopackets(ped, include_names=True)[0]])
     for p in ped.list():
-        relevant = p.affected == "affected" or p.is_carrier or p.proband
-        if not relevant:
-            assert p.id not in ids
+        for part in p.name.split():
+            assert part not in text, part
 
 
-def test_known_condition_resolves_to_mondo():
-    ped = load("example-sickle-cell.json")
-    packets, _ = to_phenopackets(ped)
-    proband = next(pp for pp in packets if pp["subject"]["id"] ==
-                   ped.probands()[0].id)
-    terms = [d["term"]["id"] for d in proband.get("diseases", [])]
-    assert any(t.startswith("MONDO:") for t in terms)
+def test_the_standard_form():
+    pedigree, _ = to_ga4gh_pedigree(load("asante"), created=CREATED)
+    for packet in pedigree["individuals"]:
+        assert set(packet["subject"]) <= {"id", "sex", "vitalStatus"}       # no name, no diseases in subject
+        assert packet["metaData"]["phenopacketSchemaVersion"] == "2.0"
+        assert packet["id"] == "ASANTE-" + packet["subject"]["id"]
+    for r in pedigree["relationships"]:
+        assert set(r) == {"individualId", "relation", "relativeId"}         # no description
+    assert pedigree["indexPatients"] == ["i3"]
 
 
-def test_freetext_condition_warns_with_empty_id():
-    # craft a pedigree with an unmapped condition
-    ped = Pedigree.from_dict({
-        "v": 1, "fam": "T",
-        "people": {"i1": {"id": "i1", "sex": "F", "affected": "affected",
-                          "condition": "Some Rare Syndrome XYZ", "proband": True}},
-        "unions": [], "_n": 2,
-    })
-    packets, warns = to_phenopackets(ped)
-    assert packets[0]["diseases"][0]["term"]["id"] == ""
-    assert any("no ontology id" in w for w in warns)
+# -- parentage: biological and social kept apart --------------------------------------------------------------
+
+def test_the_dual_layer_becomes_kin_terms():
+    pedigree, warnings = to_ga4gh_pedigree(load("asante"))
+    r = rels(pedigree)
+    assert ("i2", "KIN:027", "i3") in r and ("i1", "KIN:028", "i3") in r        # reported paternity
+    assert ("i1", "KIN:028", "i5") not in r and ("i1", "KIN:020", "i5") in r    # social father only
+    assert ("i2", "KIN:021", "i6") in r                                         # fostered in
+    assert not [x for x in r if x[1] in ("KIN:022", "KIN:039")]
+    narrative = pedigree["narrative"]
+    assert "i3's biological father, i1, is reported, not confirmed." in narrative
+    assert "i1 is the social father of i5, not the biological father." in narrative
+    assert "i6 was fostered in by i2." in narrative
+    assert any("reported, not confirmed" in w for w in warnings)
 
 
-def test_carrier_becomes_phenotypic_feature():
-    ped = load("example-sickle-cell.json")
-    packets, _ = to_phenopackets(ped)
-    carriers = [pp for pp in packets if "phenotypicFeatures" in pp]
-    assert carriers, "sickle example has carriers"
-    feat = carriers[0]["phenotypicFeatures"][0]["type"]
-    assert feat["id"].startswith("HP:")
+def test_unknown_paternity_gives_no_father_but_is_noted():
+    pedigree, _ = to_ga4gh_pedigree(load("boateng"))
+    assert not [x for x in rels(pedigree) if x[2] == "i8" and x[0] == "i9"]
+    assert ("i8's father is recorded as i9, but it is not known whether he is the biological father."
+            in pedigree["narrative"])
+    persons = {p["individualId"]: p for p in to_native_pedigree(load("boateng"))["persons"]}
+    assert persons["i8"]["paternalId"] == "0" and persons["i8"]["maternalId"] == "i4"
 
 
-# ------------------------------------------------------------ Family (single file)
-
-from abusua2ga4gh import to_family, to_native_pedigree
-
-
-@pytest.mark.parametrize("path", ALL, ids=lambda p: p.stem)
-def test_family_structure(path):
-    ped = Pedigree.load(path)
-    fam, warns = to_family(ped)
-    # required fields
-    assert fam["id"]
-    assert "proband" in fam and fam["proband"]["subject"]["id"]
-    assert "pedigree" in fam and fam["pedigree"]["persons"]
-    assert "metaData" in fam
-    # pedigree covers EVERY individual (affected or not)
-    assert len(fam["pedigree"]["persons"]) == len(ped.people)
+def test_social_parents_and_a_strictly_biological_pedigree():
+    ped = load("mensah")
+    r = rels(to_ga4gh_pedigree(ped)[0])
+    assert ("i9", "KIN:020", "i8") in r and ("i4", "KIN:027", "i8") in r
+    bio, _ = to_ga4gh_pedigree(load("asante"), include_social_edges=False)
+    assert not [x for x in rels(bio) if x[1] in ("KIN:020", "KIN:021", "KIN:022")]
+    assert "i6 was fostered in by i2." in bio["narrative"]      # the narrative still says so
 
 
-def test_family_proband_is_marked_proband():
-    ped = load("example-huntington.json")
-    fam, _ = to_family(ped)
-    assert fam["proband"]["subject"]["id"] == ped.probands()[0].id
+def test_unions():
+    assert ("i7", "KIN:026", "i10") in rels(to_ga4gh_pedigree(load("boateng"))[0])        # no children
+    assert ("i4", "KIN:026", "i9") in rels(to_ga4gh_pedigree(load("boateng"))[0])         # no biological child
+    owusu = rels(to_ga4gh_pedigree(load("owusu"))[0])
+    assert ("i7", "KIN:030", "i8") in owusu                                                # cross-cousins
+    assert not [x for x in owusu if x[1] == "KIN:026"]                                     # implied by children
+    family, _ = to_family(load("owusu"))
+    assert family["consanguinousParents"] is True
 
 
-def test_family_pedigree_ids_match_phenopacket_subjects():
-    # Pedigree.individual_id MUST map to Phenopacket subject.id (spec requirement)
-    ped = load("example-sickle-cell.json")
-    fam, _ = to_family(ped)
-    ped_ids = {row["individualId"] for row in fam["pedigree"]["persons"]}
-    subject_ids = {fam["proband"]["subject"]["id"]}
-    for rel in fam.get("relatives", []):
-        subject_ids.add(rel["subject"]["id"])
-    # every phenopacket subject id appears in the pedigree
-    assert subject_ids <= ped_ids
+def test_a_parent_whose_sex_contradicts_the_role():
+    ped = Pedigree.from_dict({"fam": "T", "people": {
+        "i1": {"sex": "M"}, "i2": {"sex": "M", "bioMotherId": "i1", "proband": True}}})
+    pedigree, warnings = to_ga4gh_pedigree(ped)
+    assert rels(pedigree) == [("i1", "KIN:003", "i2")]
+    assert any("biological parent (KIN:003)" in w for w in warnings)
 
 
-def test_family_native_pedigree_uses_ped_conventions():
-    ped = load("example-duchenne-xlinked.json")
-    nat = to_native_pedigree(ped)
-    # founders have '0' parents; affectedStatus is the enum
-    statuses = {row["affectedStatus"] for row in nat["persons"]}
-    assert statuses <= {"AFFECTED", "UNAFFECTED", "MISSING"}
-    founders = [r for r in nat["persons"] if r["paternalId"] == "0" and r["maternalId"] == "0"]
-    assert founders, "expected at least one founder with '0' parents"
+# -- conditions -----------------------------------------------------------------------------------------------
+
+def test_built_in_terms_are_right():
+    assert match("Sickle cell anaemia (HbSS)", {})["id"] == "MONDO:0011382"
+    assert match("Oculocutaneous albinism", {})["id"] == "MONDO:0018910"     # 0.2 had hereditary spastic paraplegia
+    assert match("Breast and ovarian cancer", {}) is None                     # 0.2 had complement deficiency
+    assert match("Huntington disease [MONDO:0007739]", {})["source"] == "id"
+    family, _ = to_family(load("asante"))
+    assert family["proband"]["diseases"][0]["term"] == {"id": "MONDO:0011382", "label": "sickle cell disease"}
+    mondo = [r for r in family["metaData"]["resources"] if r["namespacePrefix"] == "MONDO"][0]
+    assert mondo["version"] == "2026-10-06"
+    # a listed term written with its id is the same term, with Mondo's label and release
+    assert match("HD [MONDO:0007739]", {})["label"] == "Huntington disease"
+    boateng, _ = to_family(load("boateng"))
+    assert [r["version"] for r in boateng["metaData"]["resources"]] == ["2026-10-06"]
+    # a term from elsewhere, whose release is not known, leaves Mondo's release unknown
+    other, _ = to_family(load("boateng"), terms={"Hypertension": "MONDO:0005044"})
+    assert [r["version"] for r in other["metaData"]["resources"]] == ["unknown"]
 
 
-def test_family_unknown_paternity_sets_paternal_zero():
-    ped = load("example-sickle-cell.json")
-    nat = to_native_pedigree(ped)
-    foster = next(p for p in ped.list() if p.fostered_in)
-    row = next(r for r in nat["persons"] if r["individualId"] == foster.id)
-    assert row["paternalId"] == "0"   # unknown paternity -> no father cited
-    assert row["maternalId"] == foster.bio_mother_id
+def test_a_terms_file_matches_without_regard_to_case():
+    terms = {"night BLINDNESS": {"id": "HP:0000662", "label": "Nyctalopia", "version": "2026-09-01"},
+             "breast and ovarian cancer": "MONDO:0003582"}
+    pedigree, _ = to_ga4gh_pedigree(load("asante"), terms=terms)
+    i5 = [p for p in pedigree["individuals"] if p["subject"]["id"] == "i5"][0]
+    assert i5["phenotypicFeatures"] == [{"type": {"id": "HP:0000662", "label": "Nyctalopia"}}]  # HPO: a phenotype
+    hp = [r for r in i5["metaData"]["resources"] if r["namespacePrefix"] == "HP"][0]
+    assert hp["version"] == "2026-09-01"
+    assert "no ontology term yet" not in pedigree["narrative"]
+    adjei, _ = to_family(load("adjei"), terms=terms)
+    i3 = [p for p in adjei["relatives"] if p["subject"]["id"] == "i3"][0]
+    assert all_terms(i3) == ["MONDO:0003582"]
+    assert load_terms({"resolved": {"X": "HP:1"}}) == {"x": {"id": "HP:1", "label": "X"}}
 
 
-def test_family_relatives_only_have_findings():
-    ped = load("example-breast-cancer-brca.json")
-    fam, _ = to_family(ped)
-    proband_id = fam["proband"]["subject"]["id"]
-    for rel in fam.get("relatives", []):
-        p = ped.get(rel["subject"]["id"])
-        assert p.id != proband_id
-        assert p.affected == "affected" or p.is_carrier
+def test_unmatched_conditions_are_left_out_and_noted():
+    ped = load("asante")
+    pedigree, warnings = to_ga4gh_pedigree(ped)
+    i5 = [p for p in pedigree["individuals"] if p["subject"]["id"] == "i5"][0]
+    assert "diseases" not in i5 and "phenotypicFeatures" not in i5
+    assert "i5 has Night blindness, which has no ontology term yet." in pedigree["narrative"]
+    assert any("'Night blindness' was left out" in w for w in warnings)
+    assert unmatched(to_kindred(ped)[0]) == ["Night blindness"]
 
 
-def test_family_consanguinity_flag_on_cross_cousin_case():
-    # the sickle and albinism examples include a consanguineous cross-cousin union;
-    # if the chosen proband descends from it, the flag should be present & true.
-    # At minimum, the flag must be a bool when both parents are known.
-    ped = load("example-albinism.json")
-    fam, _ = to_family(ped)
-    proband = ped.probands()[0]
-    if ped.get(proband.bio_mother_id) and ped.get(proband.bio_father_id):
-        assert "consanguinousParents" in fam
-        assert isinstance(fam["consanguinousParents"], bool)
+def test_carriers_are_noted_never_coded():
+    for name in NAMES:
+        ped = load(name)
+        pedigree, _ = to_ga4gh_pedigree(ped)
+        text = json.dumps([pedigree, to_family(ped)[0], to_phenopackets(ped)[0]])
+        assert "HP:0032500" not in text and "Heterozygous carrier" not in text
+        for p in ped.list():
+            assert ("{} is a carrier.".format(p.id) in pedigree["narrative"]) == p.is_carrier
 
 
-# ------------------------------------------------ conditions as phenotypes
-
-def test_conditions_as_phenotype_uses_phenotypic_features():
-    ped = load("example-sickle-cell.json")
-    packets, _ = to_phenopackets(ped, condition_kind="phenotype")
-    proband = next(pp for pp in packets if pp["subject"]["id"] == ped.probands()[0].id)
-    assert "phenotypicFeatures" in proband
-    assert "diseases" not in proband
-    # the condition label is present, with an EMPTY id (no guessing)
-    labels = [f["type"]["label"] for f in proband["phenotypicFeatures"]
-              if f["type"]["id"] != "HP:0032500"]
-    assert any("Sickle cell" in l for l in labels)
-    assert all(f["type"]["id"] == "" for f in proband["phenotypicFeatures"]
-               if f["type"]["label"] != "Heterozygous carrier")
+def test_unaffected_with_a_condition_is_excluded():
+    ped = Pedigree.from_dict({"fam": "T", "people": {
+        "i1": {"sex": "F", "affected": "unaffected", "condition": "Huntington disease", "proband": True}}})
+    family, _ = to_family(ped)
+    assert family["proband"]["diseases"] == [{"term": {"id": "MONDO:0007739", "label": "Huntington disease"},
+                                              "excluded": True}]
 
 
-def test_conditions_as_disease_is_default():
-    ped = load("example-sickle-cell.json")
-    packets, _ = to_phenopackets(ped)   # default
-    proband = next(pp for pp in packets if pp["subject"]["id"] == ped.probands()[0].id)
-    assert "diseases" in proband
+def test_affected_with_nothing_recorded_is_noted():
+    pedigree, _ = to_ga4gh_pedigree(load("mensah"))
+    assert "i10 is affected, but no condition is recorded." in pedigree["narrative"]
+    assert "Recorded as unaffected: i1, i2, i4, i5, i7 and i9." in pedigree["narrative"]
+    persons = {p["individualId"]: p for p in to_family(load("mensah"))[0]["pedigree"]["persons"]}
+    assert persons["i10"]["affectedStatus"] == "AFFECTED" and persons["i10"]["sex"] == "UNKNOWN_SEX"
 
 
-def test_phenotype_mode_declares_hpo_not_mondo():
-    ped = load("example-sickle-cell.json")
-    packets, _ = to_phenopackets(ped, condition_kind="phenotype")
-    proband = next(pp for pp in packets if pp["subject"]["id"] == ped.probands()[0].id)
-    prefixes = {r["namespacePrefix"] for r in proband["metaData"]["resources"]}
-    assert "HP" in prefixes
-    assert "MONDO" not in prefixes
+def test_no_clinical():
+    pedigree, _ = to_ga4gh_pedigree(load("asante"), include_clinical=False)
+    assert not any(all_terms(p) for p in pedigree["individuals"])
+    assert "carrier" not in pedigree["narrative"] and "Conditions" not in pedigree["narrative"]
 
 
-def test_family_phenotype_mode():
-    ped = load("example-huntington.json")
-    fam, _ = to_family(ped, condition_kind="phenotype")
-    assert "phenotypicFeatures" in fam["proband"]
-    assert "diseases" not in fam["proband"]
+# -- the Family and standalone Phenopackets -------------------------------------------------------------------
+
+def test_the_family():
+    family, _ = to_family(load("adjei"))
+    assert family["proband"]["subject"]["id"] == "i4"
+    # relatives are those with findings: i2 and i8 (i3's condition has no term)
+    assert [r["subject"]["id"] for r in family["relatives"]] == ["i2", "i8"]
+    assert family["relatives"][1]["diseases"][0]["term"]["id"] == "MONDO:0007254"   # "(age 38)" is a qualifier
+    only, _ = to_family(load("adjei"), include_relative_phenopackets=False)
+    assert "relatives" not in only and errors(validate(only)) == []
+    other, warnings = to_family(load("adjei"), proband_id="i8")
+    assert other["proband"]["subject"]["id"] == "i8"
+    _, warnings = to_family(load("adjei"), proband_id="i99")
+    assert any("i99" in w for w in warnings)
+
+
+def test_no_family_without_a_proband_or_anyone_affected():
+    ped = Pedigree.from_dict({"fam": "T", "people": {"i1": {"sex": "F"}, "i2": {"sex": "M", "bioMotherId": "i1"}}})
+    family, warnings = to_family(ped)
+    assert family == {} and any("no Family can be built" in w for w in warnings)
+
+
+def test_standalone_phenopackets():
+    packets, warnings = to_phenopackets(load("asante"))
+    assert [p["subject"]["id"] for p in packets] == ["i2", "i3", "i5"]     # carrier, proband, affected
+    assert any(w.startswith("i2: the Phenopacket has no findings") for w in warnings)
+    everyone, _ = to_phenopackets(load("boateng"), affected_only=False)
+    assert {p["subject"]["id"] for p in everyone} == {"i1", "i3", "i6", "i9"}
+
+
+def test_what_pedigree_ga4gh_reads_back():
+    k, _ = from_document(to_ga4gh_pedigree(load("owusu"))[0])
+    assert len(k.members) == 11 and [m.id for m in k.members if m.index] == ["i9"]
+    assert {t.id for m in k.members for t in m.terms} == {"MONDO:0018910"}
+
+
+def test_kin_names_from_0_2_are_corrected():
+    assert kin.IS_SPERM_DONOR_OF.id == "KIN:004"
+    assert kin.IS_DIZYGOTIC_SIBLING_OF.as_dict() == {"id": "KIN:011", "label": "isPolyzygoticMultipleBirthSiblingOf"}
+    assert kin.IS_FOSTER_PARENT_OF.as_dict() == {"id": "KIN:021", "label": "isFosterParentOf"}
+
+
+# -- the command line -----------------------------------------------------------------------------------------
+
+def run(*argv):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = main([str(a) for a in argv])
+    return code, out.getvalue(), err.getvalue()
+
+
+def test_command_line(tmp_path):
+    code, out, err = run(DATA / "asante.json", "--out-dir", tmp_path)
+    assert code == 0, err
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["asante.family.json", "asante.ga4gh-pedigree.json"]
+    assert "Not yet matched to an ontology term, so left out: Night blindness." in out
+    terms = tmp_path / "terms.json"
+    terms.write_text(json.dumps({"Night blindness": "HP:0000662"}), encoding="utf-8")
+    code, out, err = run(DATA / "asante.json", "--out-dir", tmp_path / "all", "--format", "all", "--terms", terms)
+    assert code == 0 and "left out" not in out
+    assert len(list((tmp_path / "all").glob("*.phenopacket.json"))) == 3
+    code, out, err = run(DATA / "asante.json", "--format", "pedigree", "--stdout", "--include-names")
+    assert code == 0 and json.loads(out)["id"] == "ASANTE" and "--include-names is not needed" in err
+    code, out, err = run(DATA / "asante.json", "--format", "pedigree", "--stdout", "--date", "17 October")
+    assert code == 1 and "YYYY" in err
+    code, out, err = run(tmp_path / "missing.json")
+    assert code == 2 and "cannot find" in err
+    nobody = tmp_path / "nobody.json"
+    nobody.write_text(json.dumps({"fam": "T", "people": {"i1": {"sex": "F"}}}), encoding="utf-8")
+    code, out, err = run(nobody, "--format", "family", "--out-dir", tmp_path)
+    assert code == 1 and "no Family can be built" in err
