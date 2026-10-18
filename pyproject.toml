@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "abusua2ga4gh"
+version = "0.3.0"
+description = "Convert Abusua Pedigree Studio sessions to a GA4GH Pedigree and a Phenopackets Family"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    {name = "Tim Hearn", email = "tjh70@cam.ac.uk"},
+]
+keywords = ["pedigree", "phenopackets", "GA4GH", "genomics", "interoperability", "Akan"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Healthcare Industry",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+dependencies = ["pedigree-ga4gh>=1.0,<2"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+abusua2ga4gh = "abusua2ga4gh.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/comparativechrono/abusua2ga4gh"
+Issues = "https://github.com/comparativechrono/abusua2ga4gh/issues"
+Changelog = "https://github.com/comparativechrono/abusua2ga4gh/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
